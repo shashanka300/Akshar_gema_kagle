@@ -173,7 +173,15 @@ def train(cfg: FinetuneConfig):
     from datasets import Dataset as HFDataset
     raw_dataset = HFDataset.from_generator(flat_generator)
 
-    log.info(f"Loaded {len(raw_dataset)} records. Tokenising (map to disk cache)...")
+    # For smoke tests (max_steps set), only tokenise what we need —
+    # otherwise 180k samples × 1 processor call each = ~6 hours of CPU work.
+    if cfg.max_steps is not None:
+        needed = cfg.max_steps * cfg.per_device_train_batch_size * cfg.gradient_accumulation_steps * 2
+        needed = min(needed, len(raw_dataset))
+        raw_dataset = raw_dataset.select(range(needed))
+        log.info(f"Smoke test mode: limiting to {needed} samples (max_steps={cfg.max_steps})")
+
+    log.info(f"Tokenising {len(raw_dataset)} records (map to disk cache)...")
     train_dataset = raw_dataset.map(
         lambda x: process_batch(x, processor, cfg.max_seq_length),
         batched=True,
