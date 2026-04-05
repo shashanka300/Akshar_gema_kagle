@@ -18,8 +18,8 @@ echo "[1/3] Creating virtual environment and installing dependencies..."
 uv sync
 
 # 3. Install PyTorch with CUDA 12.4
-echo "[2/3] Installing PyTorch + CUDA 12.4..."
-uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+echo "[2/3] Installing PyTorch + CUDA 13.0 (RTX 5090 / Blackwell)..."
+uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
 
 # 4. Create directories
 echo "[3/3] Creating data directories..."

@@ -8,8 +8,11 @@ gemma-4-E4B-it/
 *.pt
 *.ckpt
 
-# Large data / image datasets
+# Large data / image datasets and prepared JSONL (too large for git)
 data/indic_hw/
+data/train.jsonl
+data/val.jsonl
+# Keep data/stats.json (small, useful for reference)
 
 # Python cache
 __pycache__/
@@ -20,6 +23,11 @@ __pycache__/
 
 # uv
 .uv/
+uv.lock
+
+# Training artifacts
+checkpoints/
+merged_model/
 
 # Jupyter
 .ipynb_checkpoints/
