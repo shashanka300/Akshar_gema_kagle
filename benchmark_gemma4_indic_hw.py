@@ -316,7 +316,10 @@ def load_samples(scripts: list[str], data_dir: Path, n_samples: int, split: str 
 
 def load_model(model_id: str, quantize: Optional[str] = None):
     import torch
-    from transformers import AutoProcessor, AutoModelForMultimodalLM
+    # Gemma 4 E4B is a multimodal image-text-to-text model; the correct auto
+    # class in transformers >= 5.5 is AutoModelForImageTextToText.
+    # (AutoModelForMultimodalLM does not exist in upstream transformers.)
+    from transformers import AutoProcessor, AutoModelForImageTextToText
 
     print(f"\nLoading model: {model_id}")
     if quantize:
@@ -341,7 +344,7 @@ def load_model(model_id: str, quantize: Optional[str] = None):
         from transformers import BitsAndBytesConfig
         model_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
 
-    model = AutoModelForMultimodalLM.from_pretrained(model_id, **model_kwargs)
+    model = AutoModelForImageTextToText.from_pretrained(model_id, **model_kwargs)
     model.eval()
 
     if torch.cuda.is_available():
@@ -394,18 +397,51 @@ def run_inference(model, processor, image_path: str, prompt: str, max_new_tokens
         outputs = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
     elapsed = time.perf_counter() - start
 
-    response = processor.decode(outputs[0][input_len:], skip_special_tokens=False)
-    parsed = processor.parse_response(response)
+    response = processor.decode(outputs[0][input_len:], skip_special_tokens=True)
 
-    if isinstance(parsed, str):
-        prediction = parsed.strip().split("\n")[0].strip()
-    elif isinstance(parsed, dict):
-        prediction = parsed.get("content", parsed.get("text", str(parsed)))
-        prediction = prediction.strip().split("\n")[0].strip()
+    # Try the Gemma 4 parse_response helper if present; fall back to raw decode.
+    text: str
+    if hasattr(processor, "parse_response"):
+        try:
+            parsed = processor.parse_response(response)
+            if isinstance(parsed, str):
+                text = parsed
+            elif isinstance(parsed, dict):
+                text = parsed.get("content") or parsed.get("text") or str(parsed)
+            else:
+                text = str(parsed)
+        except Exception:
+            text = response
     else:
-        prediction = str(parsed).strip().split("\n")[0].strip()
+        text = response
 
+    prediction = _extract_word(text)
     return prediction, elapsed
+
+
+def _extract_word(text: str) -> str:
+    """
+    Normalise a raw model decode into a single word.
+
+    Handles three common cases:
+      1) Clean single-word output ("ಕರ್ನಾಟಕ")
+      2) Legacy dual-format ("Transcription: ಕರ್ನಾಟಕ\\nTranslation: ...")
+      3) Multi-line noise — we take the first non-empty line.
+    """
+    if not isinstance(text, str):
+        text = str(text)
+    cleaned = text.strip()
+    # Legacy "Transcription: ..." prefix from older fine-tuning runs.
+    for prefix in ("Transcription:", "transcription:", "Transcription -", "Answer:"):
+        if cleaned.startswith(prefix):
+            cleaned = cleaned[len(prefix):].strip()
+            break
+    # First non-empty line only.
+    for line in cleaned.splitlines():
+        line = line.strip()
+        if line:
+            return line
+    return cleaned
 
 
 # ---------------------------------------------------------------------------

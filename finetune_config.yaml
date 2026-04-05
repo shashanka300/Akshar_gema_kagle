@@ -1,69 +1,49 @@
 # Akshar — Fine-tuning config for Gemma 4 E4B
-# Load with: config = FinetuneConfig.from_yaml("finetune_config.yaml")
+# Loaded by finetune.py via FinetuneConfig.from_yaml().
+# Any key not present on the FinetuneConfig dataclass is logged as "ignored".
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 model_path: "./gemma-4-E4B-it"
 data_dir: "./data"
 output_dir: "./checkpoints"
 
-# ── QLoRA ─────────────────────────────────────────────────────────────────────
+# ── LoRA ──────────────────────────────────────────────────────────────────────
+# With FastVisionModel we use the higher-level knobs instead of a flat
+# target_modules list, so the adapter consistently hits both towers.
 lora_r: 16
-lora_alpha: 32
-lora_dropout: 0.05
-# Language model layers only — vision tower uses custom int8 format, skip it
-target_modules:
-  - q_proj
-  - k_proj
-  - v_proj
-  - o_proj
-  - gate_proj
-  - up_proj
-  - down_proj
-train_vision_encoder: false   # freeze vision tower, train bridge separately
+lora_alpha: 16
+lora_dropout: 0.0
+finetune_vision_layers: true       # OCR needs the vision tower to adapt
+finetune_language_layers: true
+finetune_attention_modules: true
+finetune_mlp_modules: true
 
-# 4-bit NF4 quantization
+# 4-bit NF4 is handled internally by Unsloth when load_in_4bit=true.
 load_in_4bit: true
-bnb_4bit_quant_type: "nf4"
-bnb_4bit_compute_dtype: "bfloat16"
-bnb_4bit_use_double_quant: true
 
 # ── Training ──────────────────────────────────────────────────────────────────
 num_epochs: 3
-per_device_train_batch_size: 4
-gradient_accumulation_steps: 8   # effective batch = 32
+per_device_train_batch_size: 2     # tuned for 32 GB on RTX 5090 at seq 1024
+gradient_accumulation_steps: 16    # effective batch = 32
 learning_rate: 2.0e-4
-warmup_ratio: 0.05
-weight_decay: 0.01
-max_grad_norm: 1.0
+max_seq_length: 1024               # prompt ~30 + image 280 soft tokens + label
+warmup_ratio: 0.03
 lr_scheduler_type: "cosine"
-max_seq_length: 512
-dataloader_num_workers: 4
+weight_decay: 0.0
 
-# ── Checkpointing ─────────────────────────────────────────────────────────────
+# ── Checkpointing / logging ───────────────────────────────────────────────────
+logging_steps: 10
 save_steps: 500
-eval_steps: 500
-logging_steps: 50
 save_total_limit: 3
-# Also save a fully-merged bf16 model every N save_steps (for GGUF export)
-merged_save_every_n: 5   # merged checkpoint every 5 × save_steps = 2500 steps
+dataloader_num_workers: 2
 
-# ── Script sampling weights ───────────────────────────────────────────────────
-# Oversample scripts with low zero-shot WRR to balance training signal
-# WRR baselines: Hindi 49%, Urdu 18%, Gujarati 16%, rest ≤5%
-training_strategy: "balanced"
-script_weights:
-  Kannada:   2.0
-  Telugu:    2.0
-  Bengali:   2.0
-  Tamil:     2.0
-  Malayalam: 2.0
-  Gurumukhi: 2.0
-  Odia:      2.0
-  Gujarati:  1.5
-  Urdu:      1.5
-  Hindi:     1.0
+# ── Eval ──────────────────────────────────────────────────────────────────────
+eval_steps: 500
+eval_batch_size: 2
+max_eval_samples: 512              # cap for fast feedback mid-run
 
-# ── Logging ───────────────────────────────────────────────────────────────────
+# ── Logging backend ───────────────────────────────────────────────────────────
+report_to: "wandb"
+wandb_entity: "silverhack300"
 wandb_project: "akshar-indic-ocr"
-wandb_run_name: "gemma4-e4b-qlora-20k"
-report_to: "wandb"   # "wandb" | "tensorboard" | "none"
+wandb_run_name: "gemma4-e4b-qlora"

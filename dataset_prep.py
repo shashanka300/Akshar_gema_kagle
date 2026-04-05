@@ -20,8 +20,8 @@ Each output JSONL record:
     "label": "ಕರ್ನಾಟಕ",
     "image_b64": "<base64 PNG>",
     "messages": [
-      { "role": "user",  "content": [ {type: image}, {type: text} ] },
-      { "role": "model", "content": "Transcription: ಕರ್ನಾಟಕ\\nTranslation: [TRANSLATE]" }
+      { "role": "user",      "content": [ {type: image}, {type: text, text: ...} ] },
+      { "role": "assistant", "content": [ {type: text, text: "ಕರ್ನಾಟಕ"} ] }
     ]
   }
 
@@ -85,29 +85,21 @@ MAX_ASPECT = 15.0  # width / height ratio
 
 # ── Prompt templates ──────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = (
-    "You are an expert Indic script OCR and translation assistant. "
-    "When given an image of handwritten text, you first transcribe it exactly "
-    "as written, then translate it to English. "
-    "Always respond in this exact format:\n"
-    "Transcription: <exact text in original script>\n"
-    "Translation: <English translation>"
-)
-
 USER_PROMPT = (
-    "Look at this handwritten word image carefully. "
-    "Transcribe the handwritten text exactly as written in its original script, "
-    "then provide the English translation."
+    "Read the handwritten word in this image and output ONLY the word "
+    "in its original script. Do not add any explanation or translation."
 )
 
 
 def build_target(label: str) -> str:
     """
-    Training target for the model turn.
-    Translation is marked [TRANSLATE] — masked from loss during fine-tuning.
-    Gemma 4's multilingual pretraining handles translation at inference.
+    Training target for the assistant turn.
+    We train only on the transcription — Gemma 4 is already multilingual and
+    can handle translation zero-shot at inference time via a different prompt.
+    (The old [TRANSLATE] placeholder was being learned as a literal string
+    because nothing in the trainer masked sub-spans of the model turn.)
     """
-    return f"Transcription: {label}\nTranslation: [TRANSLATE]"
+    return label
 
 
 def image_to_base64(img: Image.Image) -> str:
@@ -128,7 +120,13 @@ def passes_quality_filter(img: Image.Image) -> bool:
 
 
 def format_sample(image: Image.Image, label: str, script: str) -> dict:
-    """Format a single sample into the Gemma 4 chat JSONL schema."""
+    """
+    Gemma 4 expects messages with a *list* of content parts
+    (see gemma-4-E4B-it/chat_template.jinja:233-243). The image is a
+    content-part of type "image"; the text is a content-part of type "text".
+    The assistant turn also carries its content as a list of parts so that
+    downstream vision collators can locate the response span.
+    """
     return {
         "script": script,
         "label": label,
@@ -142,8 +140,10 @@ def format_sample(image: Image.Image, label: str, script: str) -> dict:
                 ],
             },
             {
-                "role": "model",
-                "content": build_target(label),
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": build_target(label)},
+                ],
             },
         ],
     }

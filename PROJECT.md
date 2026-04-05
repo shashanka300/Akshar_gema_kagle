@@ -27,14 +27,24 @@ Fine-tune Gemma 4 E4B (multimodal) to transcribe handwritten Indic text AND tran
 - `dataset_prep.py`: local IHTR loader, image quality filter, streaming fix
 - `data/train.jsonl`: 179,993 records | `data/val.jsonl`: 19,995 records
 - Unsloth 2026.4.2 installed and confirmed working on RTX 5090
+- `finetune.py` fully rewritten with `AksharDataset` (streaming, zero Arrow cache)
+- Loss masking implemented (user turn masked to -100)
+- All processor outputs passed through (fixes `pixel_position_ids` AttributeError)
+- Images resized to 224×224 to prevent Gemma4 anyres tiling OOM
 
 ### 🔄 In Progress — Smoke test (50 steps)
-Run: `python -X utf8 finetune.py --max_steps 50`
+Run:
+```bash
+$env:PYTORCH_ALLOC_CONF="expandable_segments:True"
+python -X utf8 -B finetune.py --max_steps 50
+```
+Last known state: **OOM fixed (batch 2, grad_accum 16, seq 1024, fixed image size)** — not yet confirmed passing.
 
 ### ⏳ Pending
-1. Full training (3 epochs, ~4-8 hrs): `python -X utf8 finetune.py`
-2. Post-training eval: `python benchmark_gemma4_indic_hw.py --run --model ./checkpoints/final --samples 100`
-3. GGUF export + Cactus SDK integration
+1. Confirm smoke test passes (loss decreases, no crash, VRAM < 28 GB)
+2. Full training (3 epochs, ~4-8 hrs): `python -X utf8 finetune.py`
+3. Post-training eval: `python benchmark_gemma4_indic_hw.py --run --model ./checkpoints/final --samples 100`
+4. GGUF export + Cactus SDK integration
 
 ---
 
@@ -140,6 +150,30 @@ JSONL schema:
 - **Cause**: Gemma4's `AutoProcessor.__call__` requires exactly one image per text input; passing `images=[img1, img2, ...]` with `text=[t1, t2, ...]` fails
 - **Fix**: Loop over each sample individually in `process_batch`, calling `processor(text=t, images=[img])` once per sample, then concatenate results
 - **File**: `finetune.py` — `process_batch()`
+
+### Challenge 8: HF Arrow cache filled 97 GB of disk (OSError: No space left on device)
+- **Symptom**: `OSError: [Errno 28] No space left on device` during `dataset.map()` tokenisation step
+- **Cause**: HF `Dataset.map()` writes a full Arrow cache of tokenised data to `~/.cache/huggingface/datasets/`. With 180k samples × 1024 tokens each, the cache grew to 97 GB and exhausted the disk.
+- **Fix**: Replaced `HFDataset.from_generator() + .map()` with a custom `AksharDataset(TorchDataset)` that builds a byte-offset index (~1.4 MB) at init and tokenises each sample on-the-fly in `__getitem__`. Zero disk writes, zero pre-tokenisation wait.
+- **File**: `finetune.py` — replaced `process_batch` + `raw_dataset.map()` with `AksharDataset` class
+- **Cleanup**: Delete stale cache manually: `Remove-Item -Recurse -Force "C:\Users\shash\.cache\huggingface\datasets\"`
+
+### Challenge 9: AttributeError — `pixel_position_ids` missing from batch
+- **Symptom**: `AttributeError: 'bool' object has no attribute 'all'` inside `modeling_gemma4.py` line 1903: `padding_positions = (pixel_position_ids == -1).all(dim=-1)`
+- **Cause**: Gemma4 processor outputs several tensors beyond `input_ids / attention_mask / pixel_values`, including `pixel_position_ids` and possibly `token_type_ids`. The old `__getitem__` only returned 4 hardcoded keys; missing fields arrive as `None` in the model, `None == -1` returns Python `False`, and `.all()` fails on a bool.
+- **Fix**: Return all processor outputs dynamically: `result = {k: v[0] for k, v in inp.items()}` then add `labels`. This passes every key the processor emits through to the model.
+- **File**: `finetune.py` — `AksharDataset.__getitem__`
+
+### Challenge 10: CUDA OOM — 58.89 GiB allocated on 31.84 GiB card
+- **Symptom**: `torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.96 GiB. GPU 0 has a total capacity of 31.84 GiB of which 0 bytes is free. Of the allocated memory 58.89 GiB is allocated by PyTorch`
+- **Cause (1 — variable pixel_values)**: Gemma4 uses anyres/dynamic tiling — different images produce different numbers of tiles, giving `pixel_values` shapes like `[1, 3, 224, 224]` vs `[4, 3, 224, 224]`. When the DataLoader collates a batch of 16 such tensors it either pads to `[16, max_tiles, 3, 224, 224]` (massive) or errors. Memory accumulates until the card overflows.
+- **Cause (2 — batch/seq too large)**: `per_device_train_batch_size=16` with `max_seq_length=2024` was too aggressive for a multimodal model even with 4-bit quant and gradient checkpointing.
+- **Fix**:
+  1. Resize all images to 224×224 before the processor call (`img.resize((224, 224), Image.LANCZOS)`) — forces `pixel_values` to always be `[3, 224, 224]` (consistent shape, no tiling)
+  2. `per_device_train_batch_size: 2`, `gradient_accumulation_steps: 16` (effective batch stays 32)
+  3. `max_seq_length: 1024` (OCR labels are short; 2024 was wasteful)
+  4. `PYTORCH_ALLOC_CONF=expandable_segments:True` to reduce allocator fragmentation
+- **File**: `finetune.py` — `AksharDataset.__getitem__`; `finetune_config.yaml`
 
 ---
 
