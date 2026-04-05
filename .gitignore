@@ -1,0 +1,29 @@
+# Virtual environment
+.venv/
+
+# Model weights
+gemma-4-E4B-it/
+*.safetensors
+*.bin
+*.pt
+*.ckpt
+
+# Large data / image datasets
+data/indic_hw/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# uv
+.uv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db

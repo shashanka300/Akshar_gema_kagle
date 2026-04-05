@@ -1,0 +1,118 @@
+{
+  "model": "./gemma-4-E4B-it",
+  "quantize": null,
+  "split": "val",
+  "samples_per_script": 500,
+  "results": {
+    "bengali": {
+      "script": "bengali",
+      "num_samples": 500,
+      "avg_cer": 0.9790515873015873,
+      "avg_wrr": 0.040000000000000036,
+      "avg_ned": 0.7253362276612276,
+      "median_cer": 1.0,
+      "avg_inference_time": 0.24817637560005096,
+      "total_chars_gt": 2599,
+      "total_chars_pred": 3183
+    },
+    "hindi": {
+      "script": "hindi",
+      "num_samples": 500,
+      "avg_cer": 0.3246330447330448,
+      "avg_wrr": 0.49,
+      "avg_ned": 0.2429328282828283,
+      "median_cer": 0.14285714285714285,
+      "avg_inference_time": 0.2098955498000323,
+      "total_chars_gt": 2163,
+      "total_chars_pred": 2331
+    },
+    "gujarati": {
+      "script": "gujarati",
+      "num_samples": 500,
+      "avg_cer": 0.6340023754023754,
+      "avg_wrr": 0.15800000000000003,
+      "avg_ned": 0.5275002275502275,
+      "median_cer": 0.6,
+      "avg_inference_time": 0.28422706619999005,
+      "total_chars_gt": 2658,
+      "total_chars_pred": 2681
+    },
+    "gurumukhi": {
+      "script": "gurumukhi",
+      "num_samples": 500,
+      "avg_cer": 0.9220679653679654,
+      "avg_wrr": 0.03600000000000003,
+      "avg_ned": 0.721016708437761,
+      "median_cer": 0.8333333333333334,
+      "avg_inference_time": 0.28755296019995513,
+      "total_chars_gt": 2027,
+      "total_chars_pred": 2266
+    },
+    "kannada": {
+      "script": "kannada",
+      "num_samples": 500,
+      "avg_cer": 0.866538465619348,
+      "avg_wrr": 0.03600000000000003,
+      "avg_ned": 0.6901455658720363,
+      "median_cer": 0.8,
+      "avg_inference_time": 0.32439407500005835,
+      "total_chars_gt": 3406,
+      "total_chars_pred": 3616
+    },
+    "malayalam": {
+      "script": "malayalam",
+      "num_samples": 500,
+      "avg_cer": 0.8658725911343559,
+      "avg_wrr": 0.02200000000000002,
+      "avg_ned": 0.7132480610892376,
+      "median_cer": 0.8333333333333334,
+      "avg_inference_time": 0.30594906359995366,
+      "total_chars_gt": 3674,
+      "total_chars_pred": 3727
+    },
+    "odia": {
+      "script": "odia",
+      "num_samples": 500,
+      "avg_cer": 0.9084472582972583,
+      "avg_wrr": 0.02200000000000002,
+      "avg_ned": 0.7716856205885617,
+      "median_cer": 0.875,
+      "avg_inference_time": 0.35114858259996984,
+      "total_chars_gt": 2799,
+      "total_chars_pred": 2844
+    },
+    "tamil": {
+      "script": "tamil",
+      "num_samples": 500,
+      "avg_cer": 0.7371433799860271,
+      "avg_wrr": 0.04400000000000004,
+      "avg_ned": 0.5654793255952854,
+      "median_cer": 0.6666666666666666,
+      "avg_inference_time": 0.30752749859998585,
+      "total_chars_gt": 3508,
+      "total_chars_pred": 4169
+    },
+    "telugu": {
+      "script": "telugu",
+      "num_samples": 500,
+      "avg_cer": 0.8036030960267802,
+      "avg_wrr": 0.04800000000000004,
+      "avg_ned": 0.6369362590897347,
+      "median_cer": 0.7272727272727273,
+      "avg_inference_time": 0.32406436660001053,
+      "total_chars_gt": 3545,
+      "total_chars_pred": 3740
+    },
+    "urdu": {
+      "script": "urdu",
+      "num_samples": 500,
+      "avg_cer": 0.43830793650793654,
+      "avg_wrr": 0.17600000000000005,
+      "avg_ned": 0.3905499000999001,
+      "median_cer": 0.4,
+      "avg_inference_time": 0.2521256643999768,
+      "total_chars_gt": 2835,
+      "total_chars_pred": 2773
+    }
+  }
+}
