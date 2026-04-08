@@ -216,6 +216,102 @@ Step 7: NUCLEAR OPTION — overfit test
 
 ---
 
+## Pause & Resume Training
+
+### How to Pause
+
+Just **stop/interrupt the notebook cell** (click the stop button or press `Ctrl+C`).
+The last saved checkpoint will be in `./checkpoints/checkpoint-XXXX/`.
+
+Checkpoints are saved every `save_steps` steps (default 500). Each checkpoint contains everything
+needed to resume:
+
+```
+checkpoints/
+  checkpoint-500/
+  checkpoint-1000/
+  checkpoint-1500/           <-- example: latest
+    adapter_model.safetensors   # LoRA weights
+    optimizer.pt                # optimizer state (Adam momenta)
+    scheduler.pt                # LR scheduler position
+    rng_state.pth               # random number generator state
+    trainer_state.json          # step count, full loss history
+    training_args.bin           # training config snapshot
+```
+
+### How to Resume
+
+Change **cell `c56c5c34`** (the training cell) from:
+
+```python
+trainer_stats = trainer.train()
+```
+
+to:
+
+```python
+trainer_stats = trainer.train(resume_from_checkpoint=True)
+```
+
+The Trainer will automatically:
+1. Find the latest checkpoint in `output_dir` (`./checkpoints/`)
+2. Restore LoRA weights, optimizer state, LR scheduler position, and step count
+3. Continue training from exactly where it stopped
+
+### Resume from a specific checkpoint
+
+```python
+trainer_stats = trainer.train(resume_from_checkpoint="./checkpoints/checkpoint-1500")
+```
+
+### Important notes
+
+- **Re-run cells 0-9 first** before resuming — the model, processor, dataset, and trainer must be
+  recreated in memory. Only the training cell (cell 10) changes.
+- **Checkpoints accumulate** — `save_total_limit=3` keeps only the 3 most recent. Increase this
+  if you want to keep more rollback points.
+- **Changing hyperparameters mid-run**: You can change LR, batch size, etc. in the config/trainer
+  cells before resuming. The optimizer state will be restored but the new config will apply going
+  forward. Note: changing batch size or grad_accum changes the total step count, which may affect
+  the LR scheduler curve.
+
+---
+
+## Speed Optimisation
+
+### Training time estimates (775K samples, RTX 5090)
+
+| Config | Steps (1 epoch) | Est. time (1 epoch) | Est. time (3 epochs) |
+|--------|-----------------|---------------------|----------------------|
+| batch=1, accum=16, eff=16, img=512 (original) | ~48,478 | ~55 hrs | ~164 hrs (6.8 days) |
+| batch=3, accum=8, eff=24, img=384 | ~32,318 | ~24 hrs | ~71 hrs (3.0 days) |
+| batch=4, accum=8, eff=32, img=384 | ~24,239 | ~24 hrs | ~71 hrs (3.0 days) |
+| **batch=4, accum=8, eff=32, img=256** | **~24,239** | **~13 hrs** | **~39 hrs (1.6 days)** |
+| batch=6, accum=8, eff=48, img=256 | ~16,159 | ~13 hrs | ~39 hrs (1.6 days) |
+
+### Recommended fast config
+
+| Lever | Current | Recommended | Cell to edit | Impact |
+|-------|---------|-------------|-------------|--------|
+| `per_device_train_batch_size` | `1` | `4` | `f45dfb55` | Better GPU utilization (41% -> ~65%) |
+| `gradient_accumulation_steps` | `16` | `8` | `f45dfb55` | Effective batch = 32 |
+| Image `max_side` | `512` | `256` | `335d18c2` | Fewer vision tokens (biggest speed win) |
+| `num_epochs` | `3` | `1` first | `f45dfb55` | Validate learning before committing to 3 |
+| `eval_steps` | `500` | `2000` | `f45dfb55` | Less time spent evaluating |
+| `save_steps` | `500` | `2000` | `f45dfb55` | Less I/O for checkpoints |
+
+> **Note on image size 256 vs 512**: For handwritten *words* (not full pages), 256px is usually
+> enough detail. If accuracy suffers after training, bump back to 384.
+
+### Strategy: fast iteration
+
+1. Train 1 epoch with the fast config (~13 hrs)
+2. Check if loss is dropping and predictions improve
+3. If yes, resume for epochs 2-3
+4. If no, tweak hyperparameters (see Tuning Playbook above) and re-run 1 epoch
+
+---
+
 ## References
 
 - [Unsloth Gemma 4 Training Docs](https://unsloth.ai/docs/models/gemma-4/train)
