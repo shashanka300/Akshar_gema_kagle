@@ -12,7 +12,24 @@ gemma-4-E4B-it/
 data/indic_hw/
 data/train.jsonl
 data/val.jsonl
+data/train_index.jsonl
+data/val_index.jsonl
 # Keep data/stats.json (small, useful for reference)
+
+# Secrets
+.env
+
+# LoRA adapter outputs (large tokenizer + weights)
+akshar_gemma4_lora/
+
+# Unsloth compiled cache
+unsloth_compiled_cache/
+
+# Weights & Biases
+wandb/
+
+# Claude Code local settings
+.claude/
 
 # Python cache
 __pycache__/

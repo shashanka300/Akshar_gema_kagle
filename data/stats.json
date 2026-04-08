@@ -1,0 +1,42 @@
+{
+  "Hindi": {
+    "train": 69853,
+    "val": 1000
+  },
+  "Bengali": {
+    "train": 82554,
+    "val": 1000
+  },
+  "Gujarati": {
+    "train": 82563,
+    "val": 1000
+  },
+  "Gurumukhi": {
+    "train": 81042,
+    "val": 1000
+  },
+  "Kannada": {
+    "train": 73517,
+    "val": 1000
+  },
+  "Malayalam": {
+    "train": 85163,
+    "val": 1000
+  },
+  "Odia": {
+    "train": 73400,
+    "val": 1000
+  },
+  "Tamil": {
+    "train": 75714,
+    "val": 1000
+  },
+  "Telugu": {
+    "train": 80637,
+    "val": 1000
+  },
+  "Urdu": {
+    "train": 71207,
+    "val": 1000
+  }
+}
