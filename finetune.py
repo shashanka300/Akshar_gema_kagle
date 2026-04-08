@@ -68,10 +68,10 @@ class FinetuneConfig:
     weight_decay: float = 0.001
 
     # Checkpointing / logging
-    logging_steps: int = 10
+    logging_steps: int = 1
     save_steps: int = 500
     save_total_limit: int = 3
-    dataloader_num_workers: int = 2
+    dataloader_num_workers: int = 0  # >0 deadlocks on Windows with file-seeking datasets
     max_steps: Optional[int] = None   # smoke-test / CLI override
 
     # Eval
@@ -165,6 +165,14 @@ class AksharDataset(TorchDataset):
             img.load()
         else:
             raise ValueError(f"Record {idx} has neither image_path nor image_b64")
+
+        # Cap image size to prevent Gemma4 anyres tiling from creating
+        # massive tensors (Challenge 10). Max 512px on longest side.
+        max_side = 512
+        w, h = img.size
+        if max(w, h) > max_side:
+            scale = max_side / max(w, h)
+            img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
 
         # ── Extract label ──
         label = rec.get("label", "")
