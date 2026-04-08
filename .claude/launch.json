@@ -1,0 +1,41 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "data-prep",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-X", "utf8", "dataset_prep.py", "--source", "local", "--output_dir", "./data"],
+      "port": 0
+    },
+    {
+      "name": "finetune-smoke",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-X", "utf8", "-B", "finetune.py", "--max_steps", "50"],
+      "port": 0
+    },
+    {
+      "name": "finetune-full",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-X", "utf8", "-B", "finetune.py"],
+      "port": 0
+    },
+    {
+      "name": "benchmark",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-X", "utf8", "benchmark_gemma4_indic_hw.py", "--run", "--model", "./gemma-4-E4B-it", "--samples", "100"],
+      "port": 0
+    },
+    {
+      "name": "jupyter-data-prep",
+      "runtimeExecutable": "jupyter",
+      "runtimeArgs": ["notebook", "data_prep_notebook.ipynb", "--port", "8888"],
+      "port": 8888
+    },
+    {
+      "name": "jupyter-finetune",
+      "runtimeExecutable": "jupyter",
+      "runtimeArgs": ["notebook", "finetune_notebook.ipynb", "--port", "8889"],
+      "port": 8889
+    }
+  ]
+}

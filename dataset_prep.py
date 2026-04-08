@@ -3,44 +3,43 @@ dataset_prep.py
 ================
 Akshar — Dataset preparation for Gemma 4 E4B fine-tuning.
 
-Loads IIIT-INDIC-HW-WORDS per script from local IHTR data or HuggingFace,
-formats each sample into a Gemma 4 vision-language conversation,
-and saves a unified train/val split as JSONL.
+Creates lightweight path-reference JSONL index files (~10 MB) instead of
+embedding 65 GB of base64 images. Images are loaded from disk at training
+time by AksharDataset.
 
-Local data layout (default, --source local):
-  data/indic_hw/train/<folder>/train.txt   — "<relative_path> <label>" per line
-  data/indic_hw/train/<folder>/train/      — image files
+Local data layout:
+  Training:
+    data/indic_hw/train/<folder>/train.txt   — "<relative_path> <label>" per line
+    data/indic_hw/train/<folder>/train/      — image files (nested or flat)
 
-HuggingFace datasets (--source hf):
-  c3rl/IIIT-INDIC-HW-WORDS-{Script}
+  Validation (curated, 1000/script):
+    data/indic_hw/validation/validationset/<folder>/val.txt  — "<relative_path> <label>"
+    data/indic_hw/validation/validationset/<folder>/val/     — image files
 
-Each output JSONL record:
+Each output JSONL record (lightweight — no base64):
   {
-    "script": "Kannada",
-    "label": "ಕರ್ನಾಟಕ",
-    "image_b64": "<base64 PNG>",
-    "messages": [
-      { "role": "user",      "content": [ {type: image}, {type: text, text: ...} ] },
-      { "role": "assistant", "content": [ {type: text, text: "ಕರ್ನಾಟಕ"} ] }
-    ]
+    "script":     "Hindi",
+    "label":      "केंद्रों",
+    "image_path": "E:/akshar_benchmark/data/indic_hw/train/devanagari/train/8/251/21.jpg"
   }
 
 Usage:
-  # Medium run: 20k/script → ~180k train + 20k val
-  python dataset_prep.py --source local --max_per_script 20000 --output_dir ./data
+  # Full run (all scripts, all samples)
+  python -X utf8 dataset_prep.py --source local --output_dir ./data
+
+  # Capped run: 20k/script
+  python -X utf8 dataset_prep.py --source local --max_per_script 20000 --output_dir ./data
 
   # Smoke test: 100/script
-  python dataset_prep.py --source local --max_per_script 100 --output_dir ./data
+  python -X utf8 dataset_prep.py --source local --max_per_script 100 --output_dir ./data
 
   # Specific scripts only
-  python dataset_prep.py --source local --scripts Kannada Telugu --max_per_script 5000
+  python -X utf8 dataset_prep.py --source local --scripts Kannada Telugu --max_per_script 5000
 """
 
 import os
 import json
 import argparse
-import base64
-from io import BytesIO
 from pathlib import Path
 from typing import Optional, Iterator
 
@@ -49,7 +48,6 @@ from tqdm import tqdm
 
 # ── Script config ────────────────────────────────────────────────────────────
 
-# HuggingFace dataset IDs — ordered by training priority
 SCRIPT_DATASETS = {
     "Kannada":    "c3rl/IIIT-INDIC-HW-WORDS-Kannada",
     "Telugu":     "c3rl/IIIT-INDIC-HW-WORDS-Telugu",
@@ -63,7 +61,7 @@ SCRIPT_DATASETS = {
     "Gurumukhi":  "c3rl/IIIT-INDIC-HW-WORDS-Gurumukhi",
 }
 
-# Mapping from script name → on-disk IHTR folder name
+# Mapping from script name -> on-disk IHTR folder name
 IHTR_LOCAL_MAP = {
     "Hindi":      "devanagari",
     "Bengali":    "bengali",
@@ -77,35 +75,11 @@ IHTR_LOCAL_MAP = {
     "Urdu":       "urdu",
 }
 
-# Image quality thresholds — filter out noise/degenerate crops
-MIN_WIDTH  = 20    # pixels
-MIN_HEIGHT = 20    # pixels
-MIN_AREA   = 800   # width × height pixels²
-MAX_ASPECT = 15.0  # width / height ratio
-
-# ── Prompt templates ──────────────────────────────────────────────────────────
-
-USER_PROMPT = (
-    "Read the handwritten word in this image and output ONLY the word "
-    "in its original script. Do not add any explanation or translation."
-)
-
-
-def build_target(label: str) -> str:
-    """
-    Training target for the assistant turn.
-    We train only on the transcription — Gemma 4 is already multilingual and
-    can handle translation zero-shot at inference time via a different prompt.
-    (The old [TRANSLATE] placeholder was being learned as a literal string
-    because nothing in the trainer masked sub-spans of the model turn.)
-    """
-    return label
-
-
-def image_to_base64(img: Image.Image) -> str:
-    buffer = BytesIO()
-    img.save(buffer, format="PNG")
-    return base64.b64encode(buffer.getvalue()).decode("utf-8")
+# Image quality thresholds
+MIN_WIDTH  = 20
+MIN_HEIGHT = 20
+MIN_AREA   = 800
+MAX_ASPECT = 15.0
 
 
 def passes_quality_filter(img: Image.Image) -> bool:
@@ -119,51 +93,19 @@ def passes_quality_filter(img: Image.Image) -> bool:
     return True
 
 
-def format_sample(image: Image.Image, label: str, script: str) -> dict:
-    """
-    Gemma 4 expects messages with a *list* of content parts
-    (see gemma-4-E4B-it/chat_template.jinja:233-243). The image is a
-    content-part of type "image"; the text is a content-part of type "text".
-    The assistant turn also carries its content as a list of parts so that
-    downstream vision collators can locate the response span.
-    """
-    return {
-        "script": script,
-        "label": label,
-        "image_b64": image_to_base64(image),
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image"},
-                    {"type": "text", "text": USER_PROMPT},
-                ],
-            },
-            {
-                "role": "assistant",
-                "content": [
-                    {"type": "text", "text": build_target(label)},
-                ],
-            },
-        ],
-    }
+# ── Local IHTR training loader ───────────────────────────────────────────────
 
-
-# ── Local IHTR loader ─────────────────────────────────────────────────────────
-
-def load_script_local(
+def load_train_local(
     script: str,
     data_dir: str,
     max_samples: Optional[int] = None,
-) -> Iterator[tuple[Image.Image, str]]:
+) -> Iterator[tuple[str, str]]:
     """
-    Load samples from locally extracted IHTR training data.
+    Yield (absolute_image_path, label) from the training split.
 
     Layout:
-      <data_dir>/train/<folder>/train.txt   — "<img_relative_path> <label>"
+      <data_dir>/train/<folder>/train.txt  — "<img_relative_path> <label>"
       <data_dir>/train/<folder>/<img_relative_path>
-
-    Yields (PIL.Image RGB, label) tuples that pass the quality filter.
     """
     folder = IHTR_LOCAL_MAP.get(script)
     if not folder:
@@ -177,76 +119,141 @@ def load_script_local(
         print(f"[ERROR] Label file not found: {label_file}")
         return
 
-    print(f"[INFO] Loading {script} from {script_dir} ...")
+    print(f"[INFO] Loading {script} train from {script_dir} ...")
 
     filtered = 0
     yielded  = 0
 
     with open(label_file, encoding="utf-8") as f:
-        lines = f.readlines()
+        for line in f:
+            if max_samples and yielded >= max_samples:
+                break
 
-    for line in lines:
-        if max_samples and yielded >= max_samples:
-            break
-
-        line = line.strip()
-        if not line:
-            continue
-
-        # Format: "<relative_img_path> <label>"  (split on first space)
-        parts = line.split(" ", 1)
-        if len(parts) != 2:
-            continue
-
-        rel_path, label = parts
-        label = label.strip()
-        if not label:
-            continue
-
-        img_path = script_dir / rel_path
-        if not img_path.exists():
-            continue
-
-        try:
-            img = Image.open(img_path)
-            img.load()  # force pixel data into RAM — releases the file handle
-            if img.mode != "RGB":
-                img = img.convert("RGB")
-
-            if not passes_quality_filter(img):
-                filtered += 1
+            line = line.strip()
+            if not line:
                 continue
 
-            yield img, label
-            yielded += 1
+            # Format: "<relative_img_path> <label>" (split on first space)
+            parts = line.split(" ", 1)
+            if len(parts) != 2:
+                continue
 
-        except Exception:
-            pass  # skip corrupt images silently
+            rel_path, label = parts
+            label = label.strip()
+            if not label:
+                continue
+
+            img_path = script_dir / rel_path
+            if not img_path.exists():
+                continue
+
+            # Quality filter (only opens image briefly)
+            try:
+                img = Image.open(img_path)
+                img.load()
+                if not passes_quality_filter(img):
+                    filtered += 1
+                    continue
+                del img  # release immediately
+            except Exception:
+                continue
+
+            yielded += 1
+            yield str(img_path.resolve()), label
 
     if filtered:
-        print(f"[INFO] {script}: filtered {filtered} low-quality images")
+        print(f"[INFO] {script}: filtered {filtered} low-quality training images")
 
 
-# ── HuggingFace loader ────────────────────────────────────────────────────────
+# ── Local IHTR validation loader ─────────────────────────────────────────────
 
-def load_script_hf(
+def load_val_local(
     script: str,
+    data_dir: str,
     max_samples: Optional[int] = None,
-) -> Iterator[tuple[Image.Image, str]]:
-    """Load samples from HuggingFace c3rl datasets."""
+) -> Iterator[tuple[str, str]]:
+    """
+    Yield (absolute_image_path, label) from the curated validation split.
+
+    Layout:
+      <data_dir>/validation/validationset/<folder>/val.txt — "<path> <label>"
+      <data_dir>/validation/validationset/<folder>/val/    — image files
+
+    Note: val.txt references images as "test/0.jpg" but they live in "val/".
+    We remap test/ -> val/ when resolving paths.
+    """
+    folder = IHTR_LOCAL_MAP.get(script)
+    if not folder:
+        return
+
+    val_dir    = Path(data_dir) / "validation" / "validationset" / folder
+    label_file = val_dir / "val.txt"
+
+    if not label_file.exists():
+        print(f"[WARN] No validation label file: {label_file}")
+        return
+
+    print(f"[INFO] Loading {script} val from {val_dir} ...")
+    yielded = 0
+
+    with open(label_file, encoding="utf-8") as f:
+        for line in f:
+            if max_samples and yielded >= max_samples:
+                break
+
+            line = line.strip()
+            if not line:
+                continue
+
+            parts = line.split(" ", 1)
+            if len(parts) != 2:
+                continue
+
+            rel_path, label = parts
+            label = label.strip()
+            if not label:
+                continue
+
+            # Fix path: val.txt says "test/0.jpg" but images are in "val/"
+            if rel_path.startswith("test/"):
+                rel_path = "val/" + rel_path[len("test/"):]
+
+            img_path = val_dir / rel_path
+            if not img_path.exists():
+                # Also try without subfolder prefix
+                img_path = val_dir / "val" / Path(rel_path).name
+            if not img_path.exists():
+                continue
+
+            yielded += 1
+            yield str(img_path.resolve()), label
+
+
+# ── HuggingFace loader ───────────────────────────────────────────────────────
+
+def load_hf(
+    script: str,
+    split: str = "train",
+    max_samples: Optional[int] = None,
+    cache_dir: Optional[str] = None,
+) -> Iterator[tuple[str, str]]:
+    """Load from HuggingFace, save images locally, yield (path, label)."""
     from datasets import load_dataset
 
     hf_id = SCRIPT_DATASETS.get(script)
     if not hf_id:
-        print(f"[WARN] No HF dataset registered for script: {script}")
+        print(f"[WARN] No HF dataset for script: {script}")
         return
 
-    print(f"[INFO] Loading {script} from {hf_id} ...")
+    print(f"[INFO] Loading {script} from {hf_id} ({split}) ...")
     try:
-        ds = load_dataset(hf_id, split="train")
+        ds = load_dataset(hf_id, split=split)
     except Exception as e:
-        print(f"[ERROR] Failed to load {script} from HF: {e}")
+        print(f"[ERROR] Failed: {e}")
         return
+
+    out_dir = Path(cache_dir or f"./data/hf_images/{script}/{split}")
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     for idx, sample in enumerate(ds):
         if max_samples and idx >= max_samples:
@@ -260,132 +267,99 @@ def load_script_hf(
                 img = img.convert("RGB")
             if not passes_quality_filter(img):
                 continue
-            yield img, label
+
+            img_path = out_dir / f"{idx:06d}.png"
+            if not img_path.exists():
+                img.save(img_path, format="PNG")
+
+            yield str(img_path.resolve()), label
         except Exception:
             pass
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Counting helpers ─────────────────────────────────────────────────────────
 
-def _count_label_lines(
-    script: str,
-    source: str,
-    data_dir: str,
-    max_per_script: Optional[int],
-) -> int:
-    """
-    Quickly count how many valid (parseable, image-exists) lines are in the
-    label file — without opening any images. Used to compute the train/val
-    split boundary before streaming.
-    """
-    if source != "local":
-        # For HF we can't pre-count without downloading; use max_per_script as
-        # a conservative estimate and let the actual split fall where it may.
-        return max_per_script or 0
-
-    folder = IHTR_LOCAL_MAP.get(script)
-    if not folder:
-        return 0
-
-    label_file = Path(data_dir) / "train" / folder / "train.txt"
+def _count_lines(label_file: Path, max_count: Optional[int] = None) -> int:
+    """Quickly count valid label lines without opening images."""
     if not label_file.exists():
         return 0
-
-    script_dir = Path(data_dir) / "train" / folder
     count = 0
     with open(label_file, encoding="utf-8") as f:
         for line in f:
-            if max_per_script and count >= max_per_script:
+            if max_count and count >= max_count:
                 break
             line = line.strip()
             if not line:
                 continue
             parts = line.split(" ", 1)
-            if len(parts) != 2:
-                continue
-            rel_path, label = parts
-            if not label.strip():
-                continue
-            if (script_dir / rel_path).exists():
+            if len(parts) == 2 and parts[1].strip():
                 count += 1
     return count
 
 
-# ── Main prep pipeline ────────────────────────────────────────────────────────
+# ── Main pipeline ────────────────────────────────────────────────────────────
 
 def process_and_save(
     scripts: list[str],
     output_dir: str,
     source: str = "local",
     data_dir: str = "./data/indic_hw",
-    val_ratio: float = 0.1,
     max_per_script: Optional[int] = None,
+    max_val_per_script: Optional[int] = None,
 ):
     """
-    Load, format, and save all scripts as JSONL files.
+    Build lightweight path-reference JSONL index files.
 
     Outputs:
-      {output_dir}/train.jsonl
-      {output_dir}/val.jsonl
-      {output_dir}/stats.json
+      {output_dir}/train_index.jsonl   — training records (image_path, not base64)
+      {output_dir}/val_index.jsonl     — validation records (from curated val set)
+      {output_dir}/stats.json          — per-script counts
     """
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    train_path = out / "train.jsonl"
-    val_path   = out / "val.jsonl"
+    train_path = out / "train_index.jsonl"
+    val_path   = out / "val_index.jsonl"
     stats      = {}
 
     with open(train_path, "w", encoding="utf-8") as f_train, \
          open(val_path,   "w", encoding="utf-8") as f_val:
 
         for script in scripts:
-            print(f"\n{'='*55}")
+            print(f"\n{'='*60}")
             print(f"  {script}")
-            print(f"{'='*55}")
+            print(f"{'='*60}")
 
-            # Pre-count lines to determine the split boundary without loading images
-            n_total = _count_label_lines(script, source, data_dir, max_per_script)
-            if n_total == 0:
-                print(f"[WARN] No samples found for {script} — skipping")
-                continue
-
-            n_val   = max(1, int(n_total * val_ratio))
-            n_train = n_total - n_val
-            print(f"[INFO] ~{n_total} samples -> {n_train} train / {n_val} val")
-
+            # ── Training data ──
             if source == "local":
-                loader = load_script_local(script, data_dir, max_per_script)
+                train_loader = load_train_local(script, data_dir, max_per_script)
             else:
-                loader = load_script_hf(script, max_per_script)
+                train_loader = load_hf(script, "train", max_per_script)
 
-            train_count = val_count = error_count = 0
+            folder = IHTR_LOCAL_MAP.get(script, script.lower())
+            label_file = Path(data_dir) / "train" / folder / "train.txt"
+            est_total = _count_lines(label_file, max_per_script) if source == "local" else (max_per_script or 0)
 
-            # Stream directly — never hold more than one image in memory at a time
-            for idx, (img, label) in enumerate(tqdm(loader, total=n_total, desc=script, unit="img")):
-                try:
-                    record = format_sample(img, label, script)
-                    del img  # release immediately after base64 encoding
-                    line   = json.dumps(record, ensure_ascii=False)
+            train_count = 0
+            for img_path, label in tqdm(train_loader, total=est_total, desc=f"{script} train", unit="img"):
+                record = {"script": script, "label": label, "image_path": img_path}
+                f_train.write(json.dumps(record, ensure_ascii=False) + "\n")
+                train_count += 1
 
-                    if idx < n_train:
-                        f_train.write(line + "\n")
-                        train_count += 1
-                    else:
-                        f_val.write(line + "\n")
-                        val_count += 1
+            # ── Validation data (curated on-disk set) ──
+            if source == "local":
+                val_loader = load_val_local(script, data_dir, max_val_per_script)
+            else:
+                val_loader = load_hf(script, "test", max_val_per_script)
 
-                except Exception as e:
-                    error_count += 1
-                    if error_count <= 5:
-                        print(f"[WARN] Error at index {idx}: {e}")
+            val_count = 0
+            for img_path, label in tqdm(val_loader, desc=f"{script} val", unit="img"):
+                record = {"script": script, "label": label, "image_path": img_path}
+                f_val.write(json.dumps(record, ensure_ascii=False) + "\n")
+                val_count += 1
 
-            stats[script] = {
-                "train":  train_count,
-                "val":    val_count,
-                "errors": error_count,
-            }
-            print(f"[OK] {script}: {train_count} train, {val_count} val, {error_count} errors")
+            stats[script] = {"train": train_count, "val": val_count}
+            print(f"[OK] {script}: {train_count} train, {val_count} val")
 
     # Write stats
     with open(out / "stats.json", "w") as f:
@@ -394,54 +368,45 @@ def process_and_save(
     total_train = sum(v["train"] for v in stats.values())
     total_val   = sum(v["val"]   for v in stats.values())
 
-    print(f"\n{'='*55}")
+    train_size = train_path.stat().st_size / 1024 / 1024
+    val_size   = val_path.stat().st_size / 1024 / 1024
+
+    print(f"\n{'='*60}")
     print(f"Dataset prep complete!")
-    print(f"  Train : {train_path}  ({total_train} records)")
-    print(f"  Val   : {val_path}  ({total_val} records)")
+    print(f"  Train : {train_path}  ({total_train:,} records, {train_size:.1f} MB)")
+    print(f"  Val   : {val_path}  ({total_val:,} records, {val_size:.1f} MB)")
     print(f"  Stats : {out / 'stats.json'}")
-    print(f"{'='*55}\n")
+    print(f"{'='*60}\n")
 
 
-# ── CLI ───────────────────────────────────────────────────────────────────────
+# ── CLI ──────────────────────────────────────────────────────────────────────
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Akshar dataset preparation")
     parser.add_argument(
-        "--source",
-        choices=["local", "hf"],
-        default="local",
+        "--source", choices=["local", "hf"], default="local",
         help="Data source: 'local' (IHTR on disk) or 'hf' (HuggingFace). Default: local",
     )
     parser.add_argument(
-        "--data_dir",
-        type=str,
-        default="./data/indic_hw",
-        help="Root of local IHTR data (only used when --source local). Default: ./data/indic_hw",
+        "--data_dir", type=str, default="./data/indic_hw",
+        help="Root of local IHTR data (default: ./data/indic_hw)",
     )
     parser.add_argument(
-        "--scripts",
-        nargs="+",
-        default=list(SCRIPT_DATASETS.keys()),
+        "--scripts", nargs="+", default=list(SCRIPT_DATASETS.keys()),
         choices=list(SCRIPT_DATASETS.keys()),
-        help="Which scripts to include (default: all 10 in priority order)",
+        help="Which scripts to include (default: all 10)",
     )
     parser.add_argument(
-        "--output_dir",
-        type=str,
-        default="./data",
-        help="Where to save train.jsonl / val.jsonl / stats.json. Default: ./data",
+        "--output_dir", type=str, default="./data",
+        help="Where to save index JSONL files (default: ./data)",
     )
     parser.add_argument(
-        "--val_ratio",
-        type=float,
-        default=0.1,
-        help="Fraction of each script reserved for validation. Default: 0.1",
+        "--max_per_script", type=int, default=None,
+        help="Cap training samples per script (e.g. 20000)",
     )
     parser.add_argument(
-        "--max_per_script",
-        type=int,
-        default=None,
-        help="Cap samples per script before quality filtering (e.g. 20000 for medium run)",
+        "--max_val_per_script", type=int, default=None,
+        help="Cap validation samples per script (default: use all ~1000)",
     )
     return parser.parse_args()
 
@@ -453,6 +418,6 @@ if __name__ == "__main__":
         output_dir=args.output_dir,
         source=args.source,
         data_dir=args.data_dir,
-        val_ratio=args.val_ratio,
         max_per_script=args.max_per_script,
+        max_val_per_script=args.max_val_per_script,
     )

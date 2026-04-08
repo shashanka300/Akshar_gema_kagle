@@ -10,8 +10,8 @@ output_dir: "./checkpoints"
 # ── LoRA ──────────────────────────────────────────────────────────────────────
 # With FastVisionModel we use the higher-level knobs instead of a flat
 # target_modules list, so the adapter consistently hits both towers.
-lora_r: 16
-lora_alpha: 16
+lora_r: 32
+lora_alpha: 32
 lora_dropout: 0.0
 finetune_vision_layers: true       # OCR needs the vision tower to adapt
 finetune_language_layers: true
@@ -29,7 +29,7 @@ learning_rate: 2.0e-4
 max_seq_length: 1024               # prompt ~30 + image 280 soft tokens + label
 warmup_ratio: 0.03
 lr_scheduler_type: "cosine"
-weight_decay: 0.0
+weight_decay: 0.001
 
 # ── Checkpointing / logging ───────────────────────────────────────────────────
 logging_steps: 10

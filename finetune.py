@@ -24,7 +24,8 @@ import yaml
 from PIL import Image
 from torch.utils.data import Dataset as TorchDataset
 
-from unsloth import FastVisionModel, UnslothVisionDataCollator
+from unsloth import FastVisionModel, get_chat_template
+from unsloth.trainer import UnslothVisionDataCollator
 from trl import SFTTrainer, SFTConfig
 
 logging.basicConfig(
@@ -45,8 +46,8 @@ class FinetuneConfig:
     output_dir: str = "./checkpoints"
 
     # LoRA
-    lora_r: int = 16
-    lora_alpha: int = 16
+    lora_r: int = 32
+    lora_alpha: int = 32
     lora_dropout: float = 0.0
     finetune_vision_layers: bool = True
     finetune_language_layers: bool = True
@@ -64,7 +65,7 @@ class FinetuneConfig:
     max_seq_length: int = 1024
     warmup_ratio: float = 0.03
     lr_scheduler_type: str = "cosine"
-    weight_decay: float = 0.0
+    weight_decay: float = 0.001
 
     # Checkpointing / logging
     logging_steps: int = 10
@@ -110,12 +111,16 @@ class FinetuneConfig:
 
 class AksharDataset(TorchDataset):
     """
-    Streaming dataset backed by a JSONL file of base64-encoded samples.
+    Streaming dataset backed by a JSONL index file.
+
+    Supports two JSONL formats:
+      - Path-reference (new, ~10 MB): {"script", "label", "image_path"}
+      - Base64-embedded (legacy, ~65 GB): {"script", "label", "image_b64", "messages"}
 
     At __init__ we scan the file once and record the byte offset of each line
-    (~8 bytes × 180k ≈ 1.4 MB of RAM). At __getitem__ we seek to the record,
-    decode the image, and return a plain dict {"messages": [...]} that the
-    UnslothVisionDataCollator will tokenise and collate.
+    (~8 bytes per record). At __getitem__ we seek, read the record, load the
+    image from disk (or decode base64), and return a plain dict for the
+    UnslothVisionDataCollator.
     """
 
     def __init__(self, jsonl_path: str, max_samples: Optional[int] = None):
@@ -141,9 +146,6 @@ class AksharDataset(TorchDataset):
             f.seek(self.offsets[idx])
             return json.loads(f.readline())
 
-    # Prompt used at training time. We always rewrite the user turn with this
-    # canonical prompt so we don't inherit the stale "Transcribe + translate"
-    # wording baked into legacy JSONL files.
     USER_PROMPT = (
         "Read the handwritten word in this image and output ONLY the word "
         "in its original script. Do not add any explanation or translation."
@@ -152,17 +154,22 @@ class AksharDataset(TorchDataset):
     def __getitem__(self, idx: int) -> dict:
         rec = self._read_record(idx)
 
-        # Decode image — let the processor handle resizing at native resolution.
-        img = Image.open(BytesIO(base64.b64decode(rec["image_b64"]))).convert("RGB")
-        img.load()  # force pixel data into RAM; releases file descriptor
+        # ── Load image ──
+        if "image_path" in rec:
+            # New path-reference format: load directly from disk
+            img = Image.open(rec["image_path"]).convert("RGB")
+            img.load()
+        elif "image_b64" in rec:
+            # Legacy base64 format: decode from JSONL
+            img = Image.open(BytesIO(base64.b64decode(rec["image_b64"]))).convert("RGB")
+            img.load()
+        else:
+            raise ValueError(f"Record {idx} has neither image_path nor image_b64")
 
-        # Always use the canonical `label` field as the training target. This
-        # sidesteps the old "Transcription: X\nTranslation: [TRANSLATE]"
-        # literal that some legacy JSONLs embedded in the assistant turn.
-        label = rec.get("label")
+        # ── Extract label ──
+        label = rec.get("label", "")
         if not label:
-            # Last-ditch fallback for records without a top-level label.
-            asst = rec["messages"][1]["content"]
+            asst = rec.get("messages", [{}])[1].get("content", "")
             if isinstance(asst, list):
                 label = next(
                     (c["text"] for c in asst if isinstance(c, dict) and c.get("type") == "text"),
@@ -171,7 +178,7 @@ class AksharDataset(TorchDataset):
             else:
                 label = str(asst)
 
-        # Return the plain message structure the Unsloth vision collator expects.
+        # Image BEFORE text — required by Gemma 4 / Unsloth docs
         return {
             "messages": [
                 {
@@ -226,35 +233,44 @@ def train(cfg: FinetuneConfig) -> None:
     log.info(f"Loading Gemma 4 from {cfg.model_path} (4bit={cfg.load_in_4bit})")
     model, processor = FastVisionModel.from_pretrained(
         model_name=cfg.model_path,
-        max_seq_length=cfg.max_seq_length,
         load_in_4bit=cfg.load_in_4bit,
         use_gradient_checkpointing="unsloth",
     )
 
-    # 2. Attach LoRA. With FastVisionModel we use the higher-level knobs
-    #    instead of a flat target_modules list, so the adapter hits both the
-    #    language tower and (optionally) the vision tower consistently.
+    # 2. Attach LoRA adapters for parameter efficient fine-tuning.
+    #    Matches reference notebook: target_modules="all-linear" hits both
+    #    vision and language towers; gradient checkpointing is set above.
     model = FastVisionModel.get_peft_model(
         model,
-        r=cfg.lora_r,
-        lora_alpha=cfg.lora_alpha,
-        lora_dropout=cfg.lora_dropout,
         finetune_vision_layers=cfg.finetune_vision_layers,
         finetune_language_layers=cfg.finetune_language_layers,
         finetune_attention_modules=cfg.finetune_attention_modules,
         finetune_mlp_modules=cfg.finetune_mlp_modules,
-        use_gradient_checkpointing="unsloth",
-        max_seq_length=cfg.max_seq_length,
+        r=cfg.lora_r,
+        lora_alpha=cfg.lora_alpha,
+        lora_dropout=cfg.lora_dropout,
+        bias="none",
+        random_state=3407,
+        use_rslora=False,
+        loftq_config=None,
+        target_modules="all-linear",
     )
 
-    # 3. Make sure tokenizer pads on the right for training (it's left by default
-    #    for generation), and set a stable pad token if missing.
-    tok = getattr(processor, "tokenizer", processor)
-    tok.padding_side = "right"
+    # 3. Apply the Gemma 4 chat template so the processor/tokenizer knows
+    #    the correct turn markers (<|turn>user / <|turn>model). Without
+    #    this, tokenisation produces garbage.
+    processor = get_chat_template(processor, "gemma-4")
 
-    # 4. Datasets — train always, eval only if val.jsonl exists.
-    train_path = os.path.join(cfg.data_dir, "train.jsonl")
-    val_path = os.path.join(cfg.data_dir, "val.jsonl")
+    # 4. Datasets — prefer new path-reference index files, fall back to legacy base64.
+    train_index = os.path.join(cfg.data_dir, "train_index.jsonl")
+    val_index   = os.path.join(cfg.data_dir, "val_index.jsonl")
+    train_legacy = os.path.join(cfg.data_dir, "train.jsonl")
+    val_legacy   = os.path.join(cfg.data_dir, "val.jsonl")
+
+    train_path = train_index if os.path.exists(train_index) else train_legacy
+    val_path   = val_index   if os.path.exists(val_index)   else val_legacy
+
+    log.info(f"Train data: {train_path}")
     train_dataset = AksharDataset(train_path)
 
     eval_dataset = None
@@ -262,18 +278,11 @@ def train(cfg: FinetuneConfig) -> None:
         eval_dataset = AksharDataset(val_path, max_samples=cfg.max_eval_samples)
         log.info(f"Eval dataset: {len(eval_dataset):,} samples (capped)")
     else:
-        log.warning(f"No val.jsonl at {val_path}; training without eval.")
+        log.warning("No validation JSONL found; training without eval.")
 
-    # 5. Vision data collator — this is the piece that actually masks the loss
-    #    correctly against Gemma 4's real chat template tokens.
-    collator = UnslothVisionDataCollator(
-        model=model,
-        processor=processor,
-        max_seq_length=cfg.max_seq_length,
-        train_on_responses_only=True,
-        instruction_part="<|turn>user\n",
-        response_part="<|turn>model\n",
-    )
+    # 5. Vision data collator — matches reference notebook: just (model, processor).
+    #    Loss masking is applied separately via train_on_responses_only on the trainer.
+    collator = UnslothVisionDataCollator(model, processor)
 
     # 6. Trainer setup. Use SFTConfig (the TrainingArguments superset TRL wants).
     sft_kwargs = dict(
@@ -282,22 +291,25 @@ def train(cfg: FinetuneConfig) -> None:
         gradient_accumulation_steps=cfg.gradient_accumulation_steps,
         num_train_epochs=cfg.num_epochs,
         learning_rate=cfg.learning_rate,
-        warmup_ratio=cfg.warmup_ratio,
+        warmup_steps=5,
         lr_scheduler_type=cfg.lr_scheduler_type,
         weight_decay=cfg.weight_decay,
-        bf16=True,
-        fp16=False,
+        max_grad_norm=0.3,
         logging_steps=cfg.logging_steps,
         logging_first_step=True,
+        save_strategy="steps",
         save_steps=cfg.save_steps,
         save_total_limit=cfg.save_total_limit,
         report_to=cfg.report_to,
         optim="adamw_8bit",
-        remove_unused_columns=False,
-        dataset_kwargs={"skip_prepare_dataset": True},
-        dataset_text_field="",        # suppress SFTTrainer's text-field autodetect
-        max_length=cfg.max_seq_length,
+        seed=3407,
         dataloader_num_workers=cfg.dataloader_num_workers,
+
+        # Required for vision fine-tuning:
+        remove_unused_columns=False,
+        dataset_text_field="",
+        dataset_kwargs={"skip_prepare_dataset": True},
+        max_length=cfg.max_seq_length,
     )
     if cfg.max_steps is not None and cfg.max_steps > 0:
         sft_kwargs["max_steps"] = cfg.max_steps
@@ -308,12 +320,15 @@ def train(cfg: FinetuneConfig) -> None:
 
     trainer = SFTTrainer(
         model=model,
-        processing_class=processor,
+        processing_class=processor.tokenizer,
         data_collator=collator,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         args=SFTConfig(**sft_kwargs),
     )
+
+    # Note: train_on_responses_only is for TEXT fine-tuning only (needs .map()).
+    # For VISION fine-tuning, UnslothVisionDataCollator handles loss masking internally.
 
     log.info("Handing over to RTX 5090. Happy training!")
     trainer.train()
